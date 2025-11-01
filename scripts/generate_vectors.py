@@ -2,6 +2,7 @@ import mariadb
 import os
 from dotenv import load_dotenv
 import sys
+import json
 from sentence_transformers import SentenceTransformer
 
 # --- Load Database Credentials ---
@@ -27,50 +28,56 @@ airport_descriptions = {
 }
 
 
-# --- Main Function ---
 def main():
     """Adds vector capabilities to the database and generates embeddings."""
     conn = None
     try:
-        conn = mariadb.connect(user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT, database=DB_NAME)
+        conn = mariadb.connect(
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME
+        )
         cur = conn.cursor()
         print("✅ Successfully connected to MariaDB.")
 
-        # 1. Alter table to add new columns
+        # 1. Alter table to add new columns (skip if already there)
         print("🔧 Modifying 'airports' table to add description and vector columns...")
         try:
             cur.execute("ALTER TABLE airports ADD COLUMN description TEXT")
-            cur.execute("ALTER TABLE airports ADD COLUMN description_vec VECTOR(384)")
+            cur.execute("ALTER TABLE airports ADD COLUMN description_vec LONGTEXT")
             print("👍 Table altered successfully.")
         except mariadb.Error as e:
             if "Duplicate column name" in str(e):
-                print("🔹 Columns 'description' and 'description_vec' already exist. Skipping.")
+                print("🔹 Columns already exist. Skipping.")
             else:
                 raise e
 
-        # 2. Add descriptions to the database
+        # 2. Add airport descriptions
         print("✍️ Updating airports with descriptions...")
         for iata_code, desc in airport_descriptions.items():
             cur.execute("UPDATE airports SET description = ? WHERE iata = ?", (desc, iata_code))
         conn.commit()
-        print(f"✅ {cur.rowcount} airport descriptions updated.")
+        print("✅ Airport descriptions updated.")
 
         # 3. Generate and store vectors
         print("🧠 Loading AI model... (This might take a moment on first run)")
-        model = SentenceTransformer('all-MiniLM-L6-v2')  # A fast and effective model
+        model = SentenceTransformer('all-MiniLM-L6-v2')
         print("🤖 Model loaded. Generating and storing vectors...")
 
-        cur.execute("SELECT airport_id, description FROM airports WHERE description IS NOT NULL")
+        cur.execute("SELECT apid, description FROM airports WHERE description IS NOT NULL")
         airports_to_vectorize = cur.fetchall()
 
-        for airport_id, description in airports_to_vectorize:
+        count = 0
+        for apid, description in airports_to_vectorize:
             vector = model.encode(description)
-            # The VECTOR() constructor is used to insert the vector data
-            cur.execute("UPDATE airports SET description_vec = VECTOR(?) WHERE airport_id = ?",
-                        (str(list(vector)), airport_id))
+            vector_json = json.dumps(vector.tolist())  # Store as JSON text
+            cur.execute("UPDATE airports SET description_vec = ? WHERE apid = ?", (vector_json, apid))
+            count += 1
 
         conn.commit()
-        print(f"✅ Generated and stored vectors for {cur.rowcount} airports.")
+        print(f"✅ Generated and stored vectors for {count} airports.")
         print("\n🎉 Database is now ready for AI-powered searches!")
 
     except mariadb.Error as e:
